@@ -9,6 +9,7 @@ import roslib
 from time import time
 from tf.transformations import euler_from_quaternion, quaternion_from_euler
 from trac_ik_python.trac_ik import IK
+from scipy.spatial.transform import Rotation as R
 
 roslib.load_manifest('robotiq_3f_gripper_control')
 
@@ -35,17 +36,16 @@ class RobotControl:
         self.ik = IK('base_link', 'tool0', solve_type="Distance")
 
 
-    def setPosition(self, x, y, z, angle):
+    def setPosition(self, x, y, z, Q):
 
         x = float(x)
         y = float(y)
         z = float(z)
 
-        # gripper face down
-        qx = 1
-        qy = 0
-        qz = 0
-        qw = 0
+        qx = Q[0,0]
+        qy = Q[0,1]
+        qz = Q[0,2]
+        qw = Q[0,3]
 
         current_joints = self.move_group.get_current_joint_values()
         goal_joints = self.ik.get_ik(current_joints, x, y, z, qx, qy, qz, qw)
@@ -59,7 +59,7 @@ class RobotControl:
         joint_goal[2] = goal_joints[2]
         joint_goal[3] = goal_joints[3]
         joint_goal[4] = goal_joints[4]
-        joint_goal[5] = goal_joints[5]+angle
+        joint_goal[5] = goal_joints[5]
 
             
         self.move_group.go(joint_goal, wait=True)
@@ -250,7 +250,7 @@ if __name__ == '__main__':
     print("Matrix TOC")
     print(TOC)
 
-    TCA=np.array([[1, 0, 0, 0],[0, 1, 0, -0.195],[0, 0, 1, -0.035],[0, 0, 0, 1]])
+    TCA=np.array([[-0.9988957, 0, -0.0469827, 0],[0, -1, 0, 0.190],[-0.0469827, 0, 0.9988957, -0.015],[0, 0, 0, 1]])
 
     print("Matrix TCA")
     print(TCA)
@@ -269,54 +269,44 @@ if __name__ == '__main__':
     print("Point tOB")
     print(tOB)
 
-    #save current position for later use
-    original_orientation=RC.move_group.get_current_pose().pose.orientation
-    original_position=RC.move_group.get_current_pose().pose.position
-
-    input("Press enter to continue")
-    # offset above the object in m
-    offset=0.45
-
-    RC.setPosition(tOB[0], tOB[1], tOB[2]+offset, 0)
-    print("Finished ", offset ,"m above object")
-    input("Succesful? Press enter to continue")
-
     xOC=TOC[0:4,0]
     print("Matrix xOC:")
     print(xOC)
 
-    # get xAB and xOB dots
-    xOB=TAB@TCA@xOC
-    TAB=currentPose_quaternionToRotation()
-    xAB=TAB[0,0:3]
+    #offset above object in m
+    offset=0.15
 
-    #calculate angle between axes
-    theta_1=-math.acos(xAB[0])
-    theta_2=math.acos(xOB[0])
-    theta=theta_2-theta_1-math.pi/4
+    #aligning gripper with object for grabbing
+    TAG=np.array([[0.7071068, -0.7071068,  0.0000000, 0],[0.7071068,  0.7071068,  0.0000000, 0],[ 0.0000000,  0.0000000,  1.0000000 , -0.18],[0, 0, 0, 1]])
+    if(objectSize[0]>objectSize[1]):
+        TGO = np.array([[0, 1, 0, 0], [1, 0, 0, 0], [0, 0, -1, offset], [0, 0, 0, 1]])
+    else:
+        TGO = np.array([[1, 0, 0, 0], [0, -1, 0, 0], [0, 0, -1, offset], [0, 0, 0, 1]])
+    TAB=TOB@TGO@TAG
+    tOB = TAB[0:3, 3]
 
-    print("Angle theta_1(xAB):")
-    print(theta_1)
-    print("Angle theta_2(xOB):")
-    print(theta_2)
+    #Quaternion matrix from rotation
+    r = R.from_matrix([TAB[0:3, 0:3]])
+    Q= r.as_quat()
+    print("Quaternion values for rotation (Matrix Q):")
+    print(Q)
 
-    print("Angle theta(theta_2-theta_1):")
-    print(theta)
+    #save current position for later use
+    original_orientation=RC.move_group.get_current_pose().pose.orientation
+    original_position=RC.move_group.get_current_pose().pose.position
+    input("Press enter to continue")
 
-    input("Are angles okay? Press enter to continue")
-
-    #Align gripper
-    RC.setPosition(tOB[0], tOB[1], tOB[2]+offset, theta)
-
-    print("Finished aligning gripper")
-    input("Is the gripper aligned? Press enter to continue")
+    RC.setPosition(tOB[0], tOB[1], tOB[2], Q)
+    print("Finished ", offset ,"m above object")
+    input("Succesful? Press enter to continue")
 
     # Open gripper
     RC.openGripper()
 
-    # Calculate height to come down and start grabbing object
-    delta_z=offset-objectSize[2]/2-0.15
-    RC.setPositionUpDown(-delta_z)
+    #offset from tip of fingers to object center
+    new_offset=0.11
+
+    RC.setPositionUpDown(-new_offset)
     print("Finished coming down to object")
     input("Is robot ready to grip the object? Press enter to continue")
 
@@ -324,13 +314,15 @@ if __name__ == '__main__':
     RC.closeGripper()
     print("Caught the object")
 
-    RC.setPositionUpDown(delta_z+0.1)
+    RC.setPositionUpDown(new_offset)
     print("Lifted the object")
 
-    input("Can the robot drop the object? Press enter to continue")
+    input("Can the robot go down and let go of object?")
+    RC.setPositionUpDown(-new_offset+0.01)
     RC.openGripper()
-    print("Dropped the object")
 
+    print("Let go of object")
+    
     input("Can the robot go back to original position? Press enter to continue")
     #Go back to starting position
     RC.setPositionAndOrientation(original_position,original_orientation)
